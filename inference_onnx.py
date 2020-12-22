@@ -4,17 +4,19 @@ import onnxruntime as ort
 
 from scipy.ndimage import zoom
 
-from lib.data import load_dir_of_dicoms_as_numpy, LABELS, volumes_from_volume_and_slice_width
+from lib.data import load_dir_of_dicoms_as_numpy, volumes_from_volume_and_slice_width
 from lib.calculations import rescale_scaled_volume_to_ml, get_aortic_diameter_from_volumes_numpy
 
-N_CLASSES_HRNET = len(LABELS)
-MAX_VIEWPORT = 350
+# The height & width of each slice going into the network
 SLICE_DIMENSIONS_PX = (560, 560)
 
+# Onnx opset 11
 MODEL_PATH = "./models/exported_apayn_hrnet_model.onnx"
 
+# Path to directory of the dicoms (1 per slice)
 STUDY_PATHS = [(r"E:\Data\APAYN_Examples\anon\RYJ10901891", 1.565217391)]
 
+# If set to True, will display a 3D model of the anatomy
 VIS = True
 
 # LOAD MODEL
@@ -23,7 +25,8 @@ input_name = sess.get_inputs()[0].name
 output_name = sess.get_outputs()[0].name
 
 for study_path, bsa in STUDY_PATHS:
-    # Load dicom
+    # Load directory of dicoms into a stack, e.g. if 40 slices, would be 40 * 1(greyscale) * 560 * 560
+    # We also get the FOV width in mm and the spacing between slices to allow us to rescale to the patient later
     stack, fov_width_mm, slice_spacing_mm = load_dir_of_dicoms_as_numpy(study_path, SLICE_DIMENSIONS_PX)
     x = stack.astype(np.float32)  # 40x1x560x560
 
@@ -35,12 +38,19 @@ for study_path, bsa in STUDY_PATHS:
     width_to_vheight_ratio = fov_width_mm / slice_spacing_mm
     z_out = round((dim_x / width_to_vheight_ratio) * n_slices // 4)
     hrnet_out = np.swapaxes(hrnet_out, 0, 1)  # Move channel dim before slice dim; e.g. 10*40*140*140
+    # We now interpolate in 3D to ensure we take the ratio of thickness of slices and the FOV into account
     volume = np.expand_dims(zoom(hrnet_out, (1, z_out/n_slices, 1, 1)), 0)
 
+    # We then scale to the FOV
     volumes_scaled, volumes_px = volumes_from_volume_and_slice_width(volume, fov_width_mm)
 
+    # Finally we use linear regression to get the estimated volumes as accurate as possible
     lvd, rvd, lvm = rescale_scaled_volume_to_ml(volumes_scaled)
+
+    # We isolate the correct segment of aorta to measure using the pulmonary artery as a landmark
     aorta = get_aortic_diameter_from_volumes_numpy(volume)
+
+    # Finally, we index to BSA
     lvd_i, rvd_i, lvm_i, aorta_i = lvd / bsa, rvd / bsa, lvm / bsa, aorta / bsa
 
     print(f"{os.path.basename(study_path)}\n"
